@@ -9,35 +9,34 @@ from streamlit_folium import st_folium
 # ====================
 # 0. 页面配置与样式
 # ====================
-st.set_page_config(page_title="百度全能旅游助手 (智能路线版)", layout="wide", page_icon="🚗")
+st.set_page_config(page_title="百度全能旅游管家 Pro", layout="wide", page_icon="🧳")
 
 st.markdown("""
 <style>
     .weather-card {
-        background: linear-gradient(120deg, #fdfbfb 0%, #ebedee 100%);
-        padding: 12px;
-        border-radius: 12px;
+        background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+        padding: 10px;
+        border-radius: 10px;
         text-align: center;
-        color: #2c3e50;
+        border: 1px solid #fff;
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        margin-bottom: 10px;
-        border: 1px solid #ddd;
     }
-    .weather-date { font-size: 14px; color: #666; }
-    .weather-icon { font-size: 32px; margin: 5px 0; }
-    .weather-temp { font-size: 20px; font-weight: bold; color: #e65100; }
-    .weather-desc { font-size: 15px; font-weight: 500; }
+    .weather-icon { font-size: 28px; margin: 5px 0; }
+    .weather-temp { font-size: 18px; font-weight: bold; color: #333; }
     .stButton>button { border-radius: 20px; width: 100%; }
+    /* 调整 Tab 样式 */
+    .stTabs [data-baseweb="tab-list"] { gap: 10px; }
+    .stTabs [data-baseweb="tab"] { border-radius: 4px; }
 </style>
 """, unsafe_allow_html=True)
 
 # ====================
-# 1. 算法核心工具 (新增部分)
+# 1. 核心算法工具
 # ====================
 x_pi = 3.14159265358979324 * 3000.0 / 180.0
 
 def bd09_to_wgs84(bd_lon, bd_lat):
-    """百度坐标系(BD09) 转 WGS84"""
+    """百度坐标转国际坐标"""
     x = bd_lon - 0.0065
     y = bd_lat - 0.006
     z = math.sqrt(x * x + y * y) - 0.00002 * math.sin(y * x_pi)
@@ -47,47 +46,50 @@ def bd09_to_wgs84(bd_lon, bd_lat):
     return gg_lat, gg_lon
 
 def haversine_distance(lat1, lon1, lat2, lon2):
-    """
-    计算两点间的球面距离 (单位: km)
-    用于路径优化算法
-    """
-    R = 6371  # 地球半径
+    """计算两点距离 (km)"""
+    R = 6371
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
     dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi / 2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2)**2
-    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
+    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
 def optimize_route_algorithm(spots):
-    """
-    【贪心算法】最近邻路径规划
-    目标：最短距离 / 节省时间
-    """
-    if not spots:
-        return []
+    """最短路径贪心算法"""
+    if not spots: return []
+    optimized = [spots[0]]
+    remaining = spots[1:]
+    while remaining:
+        curr = optimized[-1]
+        nearest = min(remaining, key=lambda s: haversine_distance(curr['w_lat'], curr['w_lon'], s['w_lat'], s['w_lon']))
+        optimized.append(nearest)
+        remaining.remove(nearest)
+    return optimized
+
+def generate_smart_packing_list(weather_list):
+    """【新功能】根据天气生成行李清单"""
+    items = {"必带": ["身份证/学生证", "手机充电器", "充电宝", "纸巾/湿巾"]}
     
-    # 1. 以列表中的第一个景点（通常是最热门的）作为起点
-    optimized_spots = [spots[0]]
-    remaining_spots = spots[1:]
+    # 分析天气数据
+    all_text = "".join([d['text'] for d in weather_list])
+    all_temp = [int(d['high_temp']) for d in weather_list]
+    min_temp = min([int(d['low_temp']) for d in weather_list]) if weather_list else 20
     
-    # 2. 循环查找最近的下一个点
-    while remaining_spots:
-        current_spot = optimized_spots[-1]
-        
-        # 在剩余景点中找到距离当前景点最近的一个
-        nearest_spot = min(
-            remaining_spots, 
-            key=lambda s: haversine_distance(
-                current_spot['w_lat'], current_spot['w_lon'],
-                s['w_lat'], s['w_lon']
-            )
-        )
-        
-        # 加入路径并从剩余列表中移除
-        optimized_spots.append(nearest_spot)
-        remaining_spots.remove(nearest_spot)
-        
-    return optimized_spots
+    # 智能推荐
+    clothes = []
+    gear = []
+    
+    if "雨" in all_text: gear.append("雨伞/雨衣 ☔")
+    if "晴" in all_text and max(all_temp) > 25: gear.append("防晒霜/墨镜 🕶️")
+    if min_temp < 15: clothes.append("厚外套/卫衣 🧥")
+    elif min_temp < 22: clothes.append("薄外套/长袖 👔")
+    else: clothes.append("短袖/透气衣物 👕")
+    
+    if min_temp > 28: gear.append("小风扇 🎐")
+    
+    items["衣物建议"] = clothes
+    items["装备建议"] = gear
+    return items
 
 # ====================
 # 2. 百度 API 模块
@@ -97,67 +99,56 @@ def get_baidu_weather(city_name, ak):
     session.trust_env = False
     forecasts = []
     try:
-        # Step 1: 找坐标
-        geo_url = "https://api.map.baidu.com/place/v2/search"
-        geo_params = {"query": city_name, "region": city_name, "output": "json", "ak": ak, "page_size": 1}
-        geo_res = session.get(geo_url, params=geo_params).json()
-        if geo_res['status'] != 0 or not geo_res['results']: return get_mock_weather(), "MOCK"
-        location = geo_res['results'][0]['location']
+        # 1.找城市坐标
+        geo_res = session.get("https://api.map.baidu.com/place/v2/search", 
+                            params={"query": city_name, "region": city_name, "output": "json", "ak": ak, "page_size": 1}).json()
+        if geo_res['status']!=0 or not geo_res['results']: return [], "MOCK"
+        loc = geo_res['results'][0]['location']
         
-        # Step 2: 找区号
-        reg_url = "https://api.map.baidu.com/reverse_geocoding/v3/"
-        reg_params = {"ak": ak, "output": "json", "coordtype": "bd09ll", "location": f"{location['lat']},{location['lng']}"}
-        reg_res = session.get(reg_url, params=reg_params).json()
-        district_id = reg_res['result']['addressComponent']['adcode']
+        # 2.找行政区号
+        reg_res = session.get("https://api.map.baidu.com/reverse_geocoding/v3/", 
+                            params={"ak": ak, "output": "json", "coordtype": "bd09ll", "location": f"{loc['lat']},{loc['lng']}"}).json()
+        adcode = reg_res['result']['addressComponent']['adcode']
         
-        # Step 3: 查天气
-        weather_url = "https://api.map.baidu.com/weather/v1/"
-        weather_params = {"district_id": district_id, "data_type": "all", "ak": ak}
-        w_res = session.get(weather_url, params=weather_params).json()
+        # 3.查天气
+        w_res = session.get("https://api.map.baidu.com/weather/v1/", 
+                          params={"district_id": adcode, "data_type": "all", "ak": ak}).json()
         
         if w_res['status'] == 0:
             for day in w_res['result']['forecasts']:
-                text = day['text_day']
+                # 图标逻辑
+                t = day['text_day']
                 icon = "🌥️"
-                if "晴" in text: icon = "🌞"
-                elif "云" in text or "阴" in text: icon = "⛅"
-                elif "雨" in text: icon = "🌧"
-                elif "雪" in text: icon = "❄️"
+                if "晴" in t: icon = "🌞"
+                elif "雨" in t: icon = "🌧"
+                elif "雪" in t: icon = "❄️"
+                
                 forecasts.append({
                     "date": f"{day['date']} {day['week']}",
                     "icon": icon,
-                    "text": f"{day['text_day']} | {day['wind_dir_day']}",
-                    "temp": f"{day['low']}°~{day['high']}°C"
+                    "text": t,
+                    "temp": f"{day['low']}~{day['high']}°C",
+                    "low_temp": day['low'], # 用于计算穿衣
+                    "high_temp": day['high']
                 })
             return forecasts, "BAIDU"
     except: pass
-    return get_mock_weather(), "MOCK"
-
-def get_mock_weather():
-    mock = []
-    base = datetime.date.today()
-    for i in range(4):
-        d = base + datetime.timedelta(days=i)
-        t = random.randint(18, 28)
-        mock.append({"date": d.strftime("%Y-%m-%d"), "icon": "⛅", "text": "多云", "temp": f"{t-5}°~{t}°C"})
-    return mock
+    return [], "MOCK"
 
 def search_spots_baidu(keyword, city, ak):
     session = requests.Session()
     session.trust_env = False
-    url = "https://api.map.baidu.com/place/v2/search"
-    # 这里增加了 page_size 到 10，让算法有更多选择空间
-    params = {"query": keyword, "region": city, "output": "json", "ak": ak, "scope": 2, "page_size": 10}
     spots = []
     try:
-        res = session.get(url, params=params).json()
+        res = session.get("https://api.map.baidu.com/place/v2/search", 
+                        params={"query": keyword, "region": city, "output": "json", "ak": ak, "scope": 2, "page_size": 10}).json()
         if res['status'] == 0:
             for item in res['results']:
                 loc = item['location']
                 w_lat, w_lon = bd09_to_wgs84(loc['lng'], loc['lat'])
                 spots.append({
                     "name": item['name'],
-                    "addr": item.get('address', '无地址'),
+                    "addr": item.get('address', '暂无地址'),
                     "score": item.get('detail_info', {}).get('overall_rating', '4.5'),
                     "bd_lat": loc['lat'], "bd_lng": loc['lng'],
                     "w_lat": w_lat, "w_lon": w_lon
@@ -165,165 +156,188 @@ def search_spots_baidu(keyword, city, ak):
     except: pass
     return spots
 
-def search_nearby_baidu(lat, lng, query, ak):
+def search_nearby(lat, lng, query, ak):
     session = requests.Session()
     session.trust_env = False
-    url = "https://api.map.baidu.com/place/v2/search"
-    params = {"query": query, "location": f"{lat},{lng}", "radius": 1500, "output": "json", "ak": ak, "page_size": 3}
     try:
-        res = session.get(url, params=params).json()
+        res = session.get("https://api.map.baidu.com/place/v2/search", 
+                        params={"query": query, "location": f"{lat},{lng}", "radius": 2000, "output": "json", "ak": ak}).json()
         if res['status'] == 0 and res['results']:
-            return " | ".join([i['name'] for i in res['results']])
+            return " | ".join([i['name'] for i in res['results'][:3]])
     except: pass
     return "暂无推荐"
 
 # ====================
-# 3. 页面主逻辑
+# 3. 主界面
 # ====================
-st.title("🚗 智能旅游规划师 (路线优化版)")
+st.title("🧳 百度全能旅游管家 Pro")
 
+# --- 侧边栏 ---
 with st.sidebar:
     st.header("🔑 设置")
     default_ak = "A2tnlcW3BrBa0QH22VLKo20SGTA1Pt7c"
     user_ak = st.text_input("百度 AK", value=default_ak, type="password")
     
-    st.markdown("---")
-    st.header("🛠️ 路线偏好")
-    # 新增：让用户选择是否优化
-    route_mode = st.radio("规划策略", ["智能最短路径 (推荐)", "百度默认排序"])
+    st.divider()
+    st.header("💰 预算计算器")
+    budget_traffic = st.number_input("交通预算", 0, 10000, 500)
+    budget_hotel = st.number_input("住宿预算", 0, 10000, 800)
+    budget_food = st.number_input("餐饮/门票", 0, 10000, 600)
+    total = budget_traffic + budget_hotel + budget_food
+    st.metric("预计总花费", f"¥ {total}")
 
-col_weather, col_control = st.columns([5, 5])
-
-with col_control:
-    st.subheader("📅 行程输入")
-    c1, c2 = st.columns(2)
-    city = c1.text_input("目的地", "西安")
-    date = c2.date_input("出发日期", datetime.date.today())
-    
-    if st.button("🚀 生成优化方案", use_container_width=True):
-        st.session_state.search = True
-    else:
-        st.session_state.search = False
+# --- 顶部输入 ---
+c1, c2, c3 = st.columns([2, 2, 2])
+city = c1.text_input("目的地", "杭州")
+route_mode = c2.selectbox("路线策略", ["智能最短路径 (推荐)", "百度默认热度"])
+if c3.button("🚀 生成全套方案", use_container_width=True):
+    st.session_state.search = True
+else:
+    st.session_state.search = False if 'search' not in st.session_state else st.session_state.search
 
 if 'spots' not in st.session_state: st.session_state.spots = []
 if 'weather' not in st.session_state: st.session_state.weather = []
 
+# --- 核心处理 ---
 if st.session_state.search and user_ak:
-    with st.spinner("正在搜索景点并进行路径计算..."):
-        # 1. 原始搜索
-        raw_spots = search_spots_baidu("旅游景点", city, user_ak)
-        
-        if raw_spots:
-            # 2. 核心算法：路径优化
-            if "智能" in route_mode:
-                st.session_state.spots = optimize_route_algorithm(raw_spots)
-                st.toast("✅ 已为您规划最短游玩路线！", icon="🗺️")
-            else:
-                st.session_state.spots = raw_spots
-            
+    with st.spinner("正在为您规划最佳路线、查询天气、生成清单..."):
+        # 1. 搜景点
+        raw = search_spots_baidu("旅游景点", city, user_ak)
+        if raw:
+            # 2. 路线优化
+            st.session_state.spots = optimize_route_algorithm(raw) if "智能" in route_mode else raw
             # 3. 查天气
             w, _ = get_baidu_weather(city, user_ak)
             st.session_state.weather = w
             st.session_state.sel_idx = 0
+            st.toast("方案已生成！请查看下方标签页", icon="✅")
         else:
-            st.error("未找到景点")
+            st.error("未找到景点，请检查AK或城市名")
 
-# 天气展示
-with col_weather:
-    st.subheader(f"🌤️ {city} 天气")
-    if st.session_state.weather:
-        cols = st.columns(4)
-        for i, d in enumerate(st.session_state.weather[:4]):
-            with cols[i]:
-                st.markdown(f"""
-                <div class="weather-card">
-                    <div class="weather-date">{d['date']}</div>
-                    <div class="weather-icon">{d['icon']}</div>
-                    <div class="weather-temp">{d['temp']}</div>
-                    <div class="weather-desc">{d['text']}</div>
-                </div>""", unsafe_allow_html=True)
-    else:
-        st.info("请点击生成方案")
+# --- 天气卡片 ---
+if st.session_state.weather:
+    st.write(f"🌤️ **{city} 未来天气**")
+    cols = st.columns(4)
+    for i, d in enumerate(st.session_state.weather[:4]):
+        with cols[i]:
+            st.markdown(f"""
+            <div class="weather-card">
+                <div style="font-size:12px;color:#666">{d['date']}</div>
+                <div class="weather-icon">{d['icon']}</div>
+                <div class="weather-temp">{d['temp']}</div>
+                <div style="font-size:13px">{d['text']}</div>
+            </div>""", unsafe_allow_html=True)
 
-st.markdown("---")
+st.divider()
 
-# 地图展示
+# --- 下方功能区 (使用 Tabs 分页) ---
 if st.session_state.spots:
     spots = st.session_state.spots
-    st.header(f"📍 {city} 游玩路线图 ({route_mode})")
     
-    # 计算地图中心
-    center = [spots[0]['w_lat'], spots[0]['w_lon']]
-    m = folium.Map(location=center, zoom_start=13, tiles="CartoDB positron")
+    tab1, tab2, tab3 = st.tabs(["🗺️ 路线地图", "📋 景点详情", "🧰 智能工具箱"])
     
-    route_coords = []
-    
-    for i, s in enumerate(spots):
-        pt = [s['w_lat'], s['w_lon']]
-        route_coords.append(pt)
+    # === Tab 1: 地图 ===
+    with tab1:
+        center = [spots[0]['w_lat'], spots[0]['w_lon']]
+        m = folium.Map(location=center, zoom_start=13, tiles="CartoDB positron")
         
-        color = 'red' if i == st.session_state.get('sel_idx', 0) else 'blue'
-        
-        # 序号标记
-        icon_html = f"""
-            <div style="font-family: sans-serif; color: white; background-color: {color}; 
-            border-radius: 50%; width: 24px; height: 24px; display: flex; 
-            justify_content: center; align-items: center; border: 2px solid white;">
-            {i+1}
-            </div>"""
-        
-        folium.Marker(
-            location=pt,
-            popup=s['name'],
-            icon=folium.DivIcon(html=icon_html),
-            tooltip=f"第{i+1}站: {s['name']}"
-        ).add_to(m)
-    
-    # 绘制带箭头的线
-    if len(route_coords) > 1:
-        folium.PolyLine(
-            route_coords, 
-            color="#3498db", 
-            weight=5, 
-            opacity=0.8,
-            tooltip="推荐行进路线"
-        ).add_to(m)
-    
-    st_folium(m, width=1400, height=500)
-    
-    # 距离概算
-    total_dist = 0
-    for i in range(len(spots)-1):
-        total_dist += haversine_distance(
-            spots[i]['w_lat'], spots[i]['w_lon'], 
-            spots[i+1]['w_lat'], spots[i+1]['w_lon']
-        )
-    st.caption(f"📏 预计路线总直线距离: **{total_dist:.1f} km** (不含路况绕行)")
-
-    # 详情区
-    st.markdown("### 👇 景点详情 (点击查看周边)")
-    cols = st.columns(len(spots))
-    for i, s in enumerate(spots):
-        if cols[i].button(f"{i+1}. {s['name'][:4]}", key=f"b_{i}"):
-            st.session_state.sel_idx = i
-            st.rerun()
+        pts = []
+        for i, s in enumerate(spots):
+            pt = [s['w_lat'], s['w_lon']]
+            pts.append(pt)
+            color = 'red' if i == st.session_state.get('sel_idx', 0) else 'blue'
             
-    curr = spots[st.session_state.get('sel_idx', 0)]
-    with st.container():
-        st.subheader(f"🚩 第 {st.session_state.get('sel_idx', 0)+1} 站: {curr['name']}")
+            # 导航链接
+            nav_link = f"https://api.map.baidu.com/marker?location={s['bd_lat']},{s['bd_lng']}&title={s['name']}&content={s['name']}&output=html"
+            popup_html = f"""
+            <b>{i+1}. {s['name']}</b><br>
+            评分: {s['score']}<br>
+            <a href="{nav_link}" target="_blank" style="color:blue">📍 去这里 (打开百度地图)</a>
+            """
+            
+            icon_html = f"""<div style="background:{color};color:white;border-radius:50%;width:24px;height:24px;text-align:center;border:2px solid white">{i+1}</div>"""
+            folium.Marker(location=pt, popup=popup_html, icon=folium.DivIcon(html=icon_html)).add_to(m)
+            
+        if len(pts) > 1:
+            folium.PolyLine(pts, color="#3498db", weight=4, opacity=0.8).add_to(m)
+            
+        st_folium(m, width=1200, height=500)
+        
+        # 距离统计
+        dist = sum([haversine_distance(spots[i]['w_lat'], spots[i]['w_lon'], spots[i+1]['w_lat'], spots[i+1]['w_lon']) for i in range(len(spots)-1)])
+        st.caption(f"📏 路线总长约: {dist:.1f} km (直线距离)")
+
+    # === Tab 2: 详情 ===
+    with tab2:
+        cols = st.columns(len(spots))
+        for i, s in enumerate(spots):
+            if cols[i].button(f"{i+1}.{s['name'][:3]}", key=f"btn_{i}"):
+                st.session_state.sel_idx = i
+                st.rerun()
+                
+        curr = spots[st.session_state.get('sel_idx', 0)]
+        st.subheader(f"📍 {curr['name']}")
         
         cache = f"nb_{curr['name']}"
         if cache not in st.session_state:
             with st.spinner("查找周边..."):
-                f = search_nearby_baidu(curr['bd_lat'], curr['bd_lng'], "美食", user_ak)
-                h = search_nearby_baidu(curr['bd_lat'], curr['bd_lng'], "酒店", user_ak)
+                f = search_nearby(curr['bd_lat'], curr['bd_lng'], "美食", user_ak)
+                h = search_nearby(curr['bd_lat'], curr['bd_lng'], "酒店", user_ak)
                 st.session_state[cache] = (f, h)
         
         f_res, h_res = st.session_state[cache]
         c1, c2 = st.columns(2)
         with c1:
-            st.info(f"🍜 **美食**: {f_res}")
-            st.write(f"📍 **地址**: {curr['addr']}")
+            st.info(f"🍜 **美食推荐**: {f_res}")
+            st.write(f"🏠 **地址**: {curr['addr']}")
         with c2:
-            st.success(f"🏨 **住宿**: {h_res}")
+            st.success(f"🏨 **周边住宿**: {h_res}")
             st.write(f"⭐ **评分**: {curr['score']}")
+
+    # === Tab 3: 智能工具箱 (新功能) ===
+    with tab3:
+        col_list, col_export = st.columns(2)
+        
+        # 1. 智能行李清单
+        with col_list:
+            st.subheader("🎒 智能行李清单")
+            if st.session_state.weather:
+                pack_list = generate_smart_packing_list(st.session_state.weather)
+                
+                st.markdown("**必带物品:**")
+                for item in pack_list["必带"]: st.checkbox(item, value=True, key=f"must_{item}")
+                
+                st.markdown("**👕 穿衣建议 (基于天气):**")
+                for item in pack_list["衣物建议"]: st.checkbox(item, value=True, key=f"cloth_{item}")
+                
+                if pack_list["装备建议"]:
+                    st.markdown("**☔ 装备建议:**")
+                    for item in pack_list["装备建议"]: st.checkbox(item, value=True, key=f"gear_{item}")
+            else:
+                st.warning("暂无天气数据，无法生成建议")
+
+        # 2. 导出行程
+        with col_export:
+            st.subheader("📥 导出行程单")
+            
+            # 生成文本内容
+            plan_text = f"【{city} 旅游行程单】\n"
+            plan_text += f"出发日期: {datetime.date.today()}\n"
+            plan_text += f"预计预算: ¥{total}\n\n"
+            
+            plan_text += "--- ☁️ 天气预报 ---\n"
+            for d in st.session_state.weather:
+                plan_text += f"{d['date']}: {d['text']} ({d['temp']})\n"
+            
+            plan_text += "\n--- 🗺️ 游玩路线 ---\n"
+            for i, s in enumerate(spots):
+                plan_text += f"第{i+1}站: {s['name']}\n   地址: {s['addr']}\n"
+            
+            st.text_area("预览", plan_text, height=300)
+            
+            st.download_button(
+                label="📄 下载 TXT 行程单",
+                data=plan_text,
+                file_name=f"{city}_travel_plan.txt",
+                mime="text/plain"
+            )
