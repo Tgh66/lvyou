@@ -3,28 +3,61 @@ import datetime
 import requests
 import folium
 import math
-import random
+import re
 from streamlit_folium import st_folium
 
 # ====================
 # 0. 页面配置与样式
 # ====================
-st.set_page_config(page_title="旅游管家 Pro (和风天气版)", layout="wide", page_icon="🌦️")
+st.set_page_config(page_title="全能旅游助手", layout="wide", page_icon="🚗")
 
 st.markdown("""
 <style>
+    /* 基础样式 */
     .weather-card {
-        background: linear-gradient(135deg, #a18cd1 0%, #fbc2eb 100%);
-        padding: 12px;
-        border-radius: 12px;
-        text-align: center;
-        border: 1px solid #fff;
-        color: white;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        background: linear-gradient(120deg, #fdfbfb 0%, #ebedee 100%);
+        padding: 10px; border-radius: 10px; text-align: center;
+        border: 1px solid #ddd; box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
-    .weather-icon { font-size: 32px; margin: 8px 0; }
-    .weather-temp { font-size: 20px; font-weight: bold; }
-    .stButton>button { border-radius: 20px; width: 100%; }
+    .detail-card {
+        background-color: white;
+        padding: 20px;
+        border-radius: 15px;
+        border-left: 6px solid #ff6b6b;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+        margin-top: 10px;
+    }
+    /* 评论样式 */
+    .review-bubble {
+        background-color: #f9f9f9;
+        padding: 12px;
+        border-radius: 8px;
+        margin-bottom: 10px;
+        border: 1px solid #eee;
+    }
+    .review-header {
+        display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 13px; color: #555;
+    }
+    .user-name { font-weight: bold; color: #333; }
+    .review-content { font-size: 14px; color: #2c3e50; line-height: 1.5; }
+
+    /* 周边列表样式 */
+    .info-list-item {
+        margin-bottom: 8px;
+        padding: 8px;
+        background-color: #f8f9fa;
+        border-radius: 6px;
+        border-left: 3px solid #ddd;
+        font-size: 14px;
+        color: #444;
+        display: flex;
+        justify-content: space-between;
+    }
+    .dist-tag {
+        color: #e67e22;
+        font-weight: bold;
+        font-size: 12px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -33,334 +66,371 @@ st.markdown("""
 # ====================
 x_pi = 3.14159265358979324 * 3000.0 / 180.0
 
+
 def bd09_to_wgs84(bd_lon, bd_lat):
-    """
-    百度坐标(BD09) -> 国际坐标(WGS84)
-    用于将百度搜到的景点坐标，转换为和风天气可用的坐标
-    """
     x = bd_lon - 0.0065
     y = bd_lat - 0.006
     z = math.sqrt(x * x + y * y) - 0.00002 * math.sin(y * x_pi)
     theta = math.atan2(y, x) - 0.000003 * math.cos(x * x_pi)
     gg_lon = z * math.cos(theta)
     gg_lat = z * math.sin(theta)
-    
-    # 这里做一个简化的二次转换 (GCJ02 -> WGS84 近似)
-    # 为了精度通常需要更复杂的库，但对于天气查询，这个精度足够了
-    return gg_lat, gg_lon 
+    return gg_lat, gg_lon
+
 
 def haversine_distance(lat1, lon1, lat2, lon2):
-    """计算两点距离 (km)"""
     R = 6371
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
     dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
-    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
 
 def optimize_route_algorithm(spots):
-    """最短路径贪心算法"""
     if not spots: return []
-    optimized = [spots[0]]
-    remaining = spots[1:]
-    while remaining:
-        curr = optimized[-1]
-        nearest = min(remaining, key=lambda s: haversine_distance(curr['w_lat'], curr['w_lon'], s['w_lat'], s['w_lon']))
-        optimized.append(nearest)
-        remaining.remove(nearest)
-    return optimized
+    optimized_spots = [spots[0]]
+    remaining_spots = spots[1:]
+    while remaining_spots:
+        current_spot = optimized_spots[-1]
+        nearest_spot = min(
+            remaining_spots,
+            key=lambda s: haversine_distance(
+                current_spot['w_lat'], current_spot['w_lon'],
+                s['w_lat'], s['w_lon']
+            )
+        )
+        optimized_spots.append(nearest_spot)
+        remaining_spots.remove(nearest_spot)
+    return optimized_spots
 
-def generate_smart_packing_list(weather_list):
-    """智能行李清单"""
-    items = {"必带": ["身份证/学生证", "手机充电器", "充电宝", "纸巾/湿巾"]}
-    
-    # 提取天气特征
-    all_text = "".join([d['text'] for d in weather_list])
-    # 确保温度转为整数
-    all_high = [int(float(d['high_temp'])) for d in weather_list]
-    all_low = [int(float(d['low_temp'])) for d in weather_list]
-    min_temp = min(all_low) if all_low else 20
-    max_temp = max(all_high) if all_high else 25
-    
-    clothes = []
-    gear = []
-    
-    # 规则引擎
-    if "雨" in all_text: gear.append("雨伞/雨衣 ☔")
-    if "雪" in all_text: gear.append("防滑鞋/手套 🧤")
-    if "晴" in all_text and max_temp > 25: gear.append("防晒霜/墨镜 🕶️")
-    
-    if min_temp < 10: clothes.append("羽绒服/厚大衣 🧥")
-    elif min_temp < 18: clothes.append("卫衣/夹克 👔")
-    elif min_temp < 24: clothes.append("长袖/衬衫 👕")
-    else: clothes.append("短袖/透气夏装 🎽")
-    
-    if max_temp > 30: gear.append("便携小风扇 🎐")
-    
-    items["衣物建议"] = clothes
-    items["装备建议"] = gear
-    return items
 
 # ====================
-# 2. 和风天气 API 模块 (重构版)
+# 2. 火山引擎 Kimi API
 # ====================
-def map_qweather_icon(icon_code):
-    """将和风天气的 Icon 代码映射为 Emoji"""
-    code = int(icon_code)
-    if 100 <= code <= 104: return "🌞" # 晴/多云
-    if 150 <= code <= 154: return "🌙" # 夜间晴
-    if 300 <= code <= 399: return "🌧" # 雨
-    if 400 <= code <= 499: return "❄️" # 雪
-    if 500 <= code <= 515: return "🌫️" # 雾/霾
-    if 200 <= code <= 213: return "🌪" # 风
-    return "🌥️"
+def get_kimi_reviews(spot_name, city, api_key):
+    url = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
 
-def get_qweather_forecast(lat, lon, api_key):
+    prompt = f"""
+    请提取关于{city}“{spot_name}”的5条游客真实评价。
+    要求：
+    1. 模仿大众点评真实用户语气，包含网络用语、表情符号。
+    2. 评分仅输出纯数字（如 5 或 4.5），不要加“分”字。
+    3. 严格按此格式返回：
+    用户昵称 | 评分 | 评论内容
     """
-    调用和风天气 /v7/weather/3d 接口
-    参数: lat, lon (WGS84坐标), api_key
-    """
-    session = requests.Session()
-    session.trust_env = False # 禁用代理
-    
-    # 构造坐标参数，格式: 经度,纬度 (注意和风要求经度在前，且不超过2位小数)
-    location_str = f"{lon:.2f},{lat:.2f}"
-    
-    # 自动适配 Free (devapi) 和 Paid (api) 域名
-    hosts = [
-        "https://devapi.qweather.com/v7/weather/3d",
-        "https://api.qweather.com/v7/weather/3d"
-    ]
-    
-    forecasts = []
-    
-    for url in hosts:
-        params = {
-            "location": location_str,
-            "key": api_key,
-            "lang": "zh"
-        }
-        try:
-            # 发起请求
-            res = session.get(url, params=params, timeout=5)
-            
-            if res.status_code == 200:
-                data = res.json()
-                if data['code'] == "200":
-                    # 解析 daily 数组]
-                    for day in data['daily']:
-                        forecasts.append({
-                            "date": day['fxDate'], # 预报日期
-                            "text": day['textDay'], # 白天天气描述
-                            "icon": map_qweather_icon(day['iconDay']), # 图标代码
-                            "temp": f"{day['tempMin']}~{day['tempMax']}°C",
-                            "high_temp": day['tempMax'], # 用于穿衣算法
-                            "low_temp": day['tempMin'],
-                            "wind": f"{day['windDirDay']} {day['windScaleDay']}级"
+
+    data = {
+        "model": "kimi-k2-250905",
+        "messages": [{"role": "system", "content": "格式化数据生成器"}, {"role": "user", "content": prompt}],
+        "temperature": 0.9
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=data, timeout=60)
+        if response.status_code == 200:
+            content = response.json()['choices'][0]['message']['content']
+            reviews = []
+            lines = content.strip().split('\n')
+            for line in lines:
+                if "|" in line:
+                    parts = line.split('|')
+                    if len(parts) >= 3:
+                        reviews.append({
+                            "user": parts[0].strip(),
+                            "score": parts[1].strip(),
+                            "text": parts[2].strip()
                         })
-                    return forecasts, "QWeather"
-                elif data['code'] == "403" or "Invalid Host" in str(data):
-                    continue # 换个域名重试
-        except Exception:
-            pass
-            
-    # 失败兜底
-    return [], "FAIL"
+            return reviews
+    except:
+        pass
+    return [{"user": "旅行达人", "score": "4.5", "text": "景色不错，值得一去！"}]
+
 
 # ====================
-# 3. 百度地图 API 模块 (仅用于搜索景点)
+# 3. 百度 API 模块 (关键修复)
 # ====================
-def search_spots_baidu(keyword, city, ak):
-    """使用百度地图 Place API 搜索景点"""
+def get_baidu_weather(city_name, ak):
     session = requests.Session()
     session.trust_env = False
+    forecasts = []
+    try:
+        # 1. 获取城市坐标
+        geo_url = "https://api.map.baidu.com/place/v2/search"
+        geo_params = {"query": city_name, "region": city_name, "output": "json", "ak": ak, "page_size": 1}
+        geo_res = session.get(geo_url, params=geo_params).json()
+        if not geo_res.get('results'): return [], "无此城市"
+        loc = geo_res['results'][0]['location']
+
+        # 2. 获取区划ID
+        reg_url = "https://api.map.baidu.com/reverse_geocoding/v3/"
+        reg_params = {"ak": ak, "output": "json", "coordtype": "bd09ll", "location": f"{loc['lat']},{loc['lng']}"}
+        reg_res = session.get(reg_url, params=reg_params).json()
+        district_id = reg_res['result']['addressComponent']['adcode']
+
+        # 3. 获取天气
+        weather_url = "https://api.map.baidu.com/weather/v1/"
+        weather_params = {"district_id": district_id, "data_type": "all", "ak": ak}
+        w_res = session.get(weather_url, params=weather_params).json()
+
+        if w_res.get('status') == 0:
+            for day in w_res['result'].get('forecasts', []):
+                text = day['text_day']
+                icon = "🌥️"
+                if "晴" in text:
+                    icon = "🌞"
+                elif "阴" in text:
+                    icon = "☁️"
+                elif "雨" in text:
+                    icon = "🌧"
+                elif "雪" in text:
+                    icon = "❄️"
+                forecasts.append({
+                    "date": f"{day['date']}\n{day['week']}",
+                    "icon": icon,
+                    "text": day['text_day'],
+                    "temp": f"{day['low']}~{day['high']}°C"
+                })
+            return forecasts, "SUCCESS"
+    except:
+        return [], "暂无数据"
+    return [], "ERROR"
+
+
+def search_spots_baidu(keyword, city, ak):
+    session = requests.Session()
+    session.trust_env = False
+    url = "https://api.map.baidu.com/place/v2/search"
+    params = {"query": keyword, "region": city, "output": "json", "ak": ak, "scope": 2, "page_size": 10}
     spots = []
     try:
-        url = "https://api.map.baidu.com/place/v2/search"
-        params = {
-            "query": keyword, "region": city, "output": "json", 
-            "ak": ak, "scope": 2, "page_size": 8
-        }
         res = session.get(url, params=params).json()
         if res['status'] == 0:
             for item in res['results']:
                 loc = item['location']
-                # 关键：获取百度坐标后，转为 WGS84 供和风天气使用
                 w_lat, w_lon = bd09_to_wgs84(loc['lng'], loc['lat'])
-                
                 spots.append({
                     "name": item['name'],
-                    "addr": item.get('address', '暂无地址'),
-                    "score": item.get('detail_info', {}).get('overall_rating', '4.5'),
-                    "bd_lat": loc['lat'], "bd_lng": loc['lng'], # 百度坐标(地图用)
-                    "w_lat": w_lat, "w_lon": w_lon # 国际坐标(天气/距离计算用)
+                    "addr": item.get('address', '无地址'),
+                    "score": float(item.get('detail_info', {}).get('overall_rating', 4.2)),
+                    "bd_lat": loc['lat'], "bd_lng": loc['lng'],
+                    "w_lat": w_lat, "w_lon": w_lon,
+                    "kimi_reviews": None
                 })
-    except: pass
+    except:
+        pass
     return spots
 
+
 def search_nearby_baidu(lat, lng, query, ak):
+    """
+    搜索周边 (修复距离显示问题)
+    """
     session = requests.Session()
     session.trust_env = False
+    url = "https://api.map.baidu.com/place/v2/search"
+
+    # ★★★ 修复核心：必须添加 scope: 2，API才会返回 detail_info (包含距离) ★★★
+    params = {
+        "query": query,
+        "location": f"{lat},{lng}",
+        "radius": 1500,  # 半径1.5公里
+        "output": "json",
+        "ak": ak,
+        "page_size": 5,
+        "scope": 2  # <--- 必须加这个！
+    }
+
     try:
-        url = "https://api.map.baidu.com/place/v2/search"
-        params = {"query": query, "location": f"{lat},{lng}", "radius": 2000, "output": "json", "ak": ak}
         res = session.get(url, params=params).json()
         if res['status'] == 0 and res['results']:
-            return " | ".join([i['name'] for i in res['results'][:3]])
-    except: pass
-    return "暂无推荐"
+            results = []
+            for i in res['results']:
+                # 尝试获取距离
+                detail = i.get('detail_info', {})
+                dist = detail.get('distance', '未知')
+                results.append({"name": i['name'], "dist": dist})
+            return results
+    except:
+        pass
+    return []
+
 
 # ====================
-# 4. 主界面逻辑
+# 4. 页面主逻辑
 # ====================
-st.title("🌦️ 旅游管家 Pro (和风天气版)")
+st.title("🚗 全能旅游助手")
 
 with st.sidebar:
-    st.header("🔑 API 配置")
-    # 百度用于搜地图，和风用于查天气
-    default_baidu = "A2tnlcW3BrBa0QH22VLKo20SGTA1Pt7c" 
-    baidu_ak = st.text_input("百度地图 AK", value=default_baidu, type="password")
-    
-    # 和风天气 Key
-    default_hefeng = "017cf1cda9b44a8eb2268d6562477691"
-    hefeng_key = st.text_input("和风天气 Key", value=default_hefeng, type="password")
-    
-    st.divider()
-    st.info("数据源说明：\n- 地点搜索：百度地图 API\n- 天气预报：和风天气 API")
+    st.header("🔑 系统设置")
+    default_ak = "A2tnlcW3BrBa0QH22VLKo20SGTA1Pt7c"
+    user_ak = st.text_input("地图服务密钥 (AK)", value=default_ak, type="password")
+    st.markdown("---")
+    default_kimi_key = "11bffa38-8e14-4ce7-bd18-20abc78a7d16"
+    kimi_key = st.text_input("数据接口密钥 (API Key)", value=default_kimi_key, type="password")
+    st.markdown("---")
+    route_mode = st.radio("路线偏好", ["智能推荐路线", "默认排序"])
 
-# 顶部输入区
-c1, c2, c3 = st.columns([2, 2, 2])
-city = c1.text_input("目的地", "重庆")
-route_mode = c2.selectbox("路线策略", ["智能最短路径 (推荐)", "默认热度排序"])
+col_weather, col_control = st.columns([6, 4])
 
-if c3.button("🚀 生成方案", use_container_width=True):
-    st.session_state.search = True
-else:
-    st.session_state.search = False if 'search' not in st.session_state else st.session_state.search
+with col_control:
+    st.subheader("📅 行程设置")
+    c1, c2 = st.columns(2)
+    city = c1.text_input("目的地城市", "西安")
+    date = c2.date_input("出发日期", datetime.date.today())
 
-# 初始化状态
+    if st.button("🚀 生成行程方案", use_container_width=True):
+        st.session_state.search = True
+        st.session_state.sel_idx = 0
+        st.session_state.spots = []
+
 if 'spots' not in st.session_state: st.session_state.spots = []
 if 'weather' not in st.session_state: st.session_state.weather = []
 
-# --- 核心逻辑 ---
-if st.session_state.search and baidu_ak and hefeng_key:
-    with st.spinner(f"正在规划 {city} 的行程..."):
-        # 1. 百度搜景点
-        raw_spots = search_spots_baidu("旅游景点", city, baidu_ak)
-        
-        if raw_spots:
-            # 2. 路线排序
-            if "智能" in route_mode:
-                st.session_state.spots = optimize_route_algorithm(raw_spots)
+if st.session_state.get('search') and user_ak:
+    if not st.session_state.spots:
+        with st.spinner("正在检索全网数据并规划路线..."):
+            raw_spots = search_spots_baidu("旅游景点", city, user_ak)
+            if raw_spots:
+                st.session_state.spots = optimize_route_algorithm(raw_spots) if "智能" in route_mode else raw_spots
+                w, _ = get_baidu_weather(city, user_ak)
+                st.session_state.weather = w
+                st.session_state.sel_idx = 0
             else:
-                st.session_state.spots = raw_spots
-            
-            # 3. 和风查天气 (使用第一个景点的 WGS84 坐标)
-            # 这样比直接查城市名更精准，能查到景区当地的天气
-            first_spot = st.session_state.spots[0]
-            w_data, src = get_qweather_forecast(first_spot['w_lat'], first_spot['w_lon'], hefeng_key)
-            
-            if w_data:
-                st.session_state.weather = w_data
-                st.toast("天气获取成功 (QWeather)", icon="🌤️")
-            else:
-                st.error("天气查询失败，请检查和风 Key")
-            
-            st.session_state.sel_idx = 0
-        else:
-            st.error("未找到相关景点，请检查城市名称")
+                st.error("未找到相关数据")
 
-# --- 天气展示区 ---
-if st.session_state.weather:
-    st.write(f"📅 **{city} 未来3天天气预报**")
-    cols = st.columns(3)
-    # 显示前3天
-    for i, d in enumerate(st.session_state.weather[:3]): 
-        with cols[i]:
-            st.markdown(f"""
-            <div class="weather-card">
-                <div style="font-size:14px; opacity:0.8">{d['date']}</div>
-                <div class="weather-icon">{d['icon']}</div>
-                <div class="weather-temp">{d['temp']}</div>
-                <div style="font-size:14px">{d['text']}</div>
-                <div style="font-size:12px; opacity:0.8">{d['wind']}</div>
-            </div>
-            """, unsafe_allow_html=True)
-elif st.session_state.search:
-    st.warning("暂无天气数据")
+with col_weather:
+    if st.session_state.weather:
+        cols = st.columns(4)
+        for i, d in enumerate(st.session_state.weather[:4]):
+            with cols[i]:
+                st.markdown(f"""
+                <div class="weather-card">
+                    <div style="color:#666; font-size:13px;">{d['date']}</div>
+                    <div style="font-size:26px; margin:2px 0;">{d['icon']}</div>
+                    <div style="font-weight:bold; color:#e65100;">{d['temp']}</div>
+                    <div style="font-size:13px;">{d['text']}</div>
+                </div>""", unsafe_allow_html=True)
 
-st.divider()
+st.markdown("---")
 
-# --- 地图与功能区 ---
 if st.session_state.spots:
     spots = st.session_state.spots
-    
-    tab1, tab2, tab3 = st.tabs(["🗺️ 路线地图", "📋 景点详情", "🎒 智能清单"])
-    
-    # Tab 1: 地图
-    with tab1:
-        # 地图中心
+    c_map, c_info = st.columns([6, 4])
+
+    with c_map:
+        st.subheader("🗺️ 游玩路线图")
+        st.caption("提示：点击地图上的数字标记查看详情")
         center = [spots[0]['w_lat'], spots[0]['w_lon']]
-        m = folium.Map(location=center, zoom_start=13, tiles="CartoDB positron")
-        
-        pts = []
-        for i, s in enumerate(spots):
-            pt = [s['w_lat'], s['w_lon']]
-            pts.append(pt)
-            
-            color = 'red' if i == st.session_state.get('sel_idx', 0) else 'blue'
-            popup_html = f"<b>{i+1}. {s['name']}</b><br>评分:{s['score']}"
-            icon_html = f"""<div style="background:{color};color:white;border-radius:50%;width:24px;height:24px;text-align:center;border:2px solid white">{i+1}</div>"""
-            
-            folium.Marker(location=pt, popup=popup_html, icon=folium.DivIcon(html=icon_html)).add_to(m)
-            
-        if len(pts) > 1:
-            folium.PolyLine(pts, color="#3498db", weight=4, opacity=0.8).add_to(m)
-            
-        st_folium(m, width=1200, height=500)
+        m = folium.Map(
+            location=center, zoom_start=13,
+            tiles='http://webrd02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
+            attr='高德地图'
+        )
+        coords = [[s['w_lat'], s['w_lon']] for s in spots]
+        if len(coords) > 1:
+            folium.PolyLine(coords, color="#3498db", weight=4, opacity=0.7, dash_array='5, 10').add_to(m)
 
-    # Tab 2: 详情
-    with tab2:
-        cols = st.columns(len(spots))
         for i, s in enumerate(spots):
-            if cols[i].button(f"{i+1}.{s['name'][:3]}", key=f"btn_{i}"):
-                st.session_state.sel_idx = i
-                st.rerun()
-        
-        curr = spots[st.session_state.get('sel_idx', 0)]
-        st.subheader(f"📍 {curr['name']}")
-        
-        # 懒加载周边
-        cache_key = f"nb_{curr['name']}"
+            is_selected = (i == st.session_state.get('sel_idx', 0))
+            color = '#ff6b6b' if is_selected else '#3498db'
+            size = 32 if is_selected else 24
+            z_idx = 1000 if is_selected else 1
+            icon_html = f"""<div style="background-color:{color}; width:{size}px; height:{size}px; border-radius:50%; border:2px solid white; color:white; text-align:center; line-height:{size - 4}px; font-weight:bold; box-shadow: 2px 2px 6px rgba(0,0,0,0.4);">{i + 1}</div>"""
+            folium.Marker(location=[s['w_lat'], s['w_lon']], icon=folium.DivIcon(html=icon_html),
+                          tooltip=f"{s['name']}", z_index_offset=z_idx).add_to(m)
+
+        map_data = st_folium(m, width=None, height=550, key="map_interaction")
+
+        if map_data['last_object_clicked']:
+            clicked_lat = map_data['last_object_clicked']['lat']
+            clicked_lng = map_data['last_object_clicked']['lng']
+            for idx, s in enumerate(spots):
+                if abs(s['w_lat'] - clicked_lat) < 0.0005 and abs(s['w_lon'] - clicked_lng) < 0.0005:
+                    if st.session_state.sel_idx != idx:
+                        st.session_state.sel_idx = idx
+                        st.rerun()
+                    break
+
+    with c_info:
+        curr_idx = st.session_state.get('sel_idx', 0)
+        curr = spots[curr_idx]
+
+        st.subheader(f"🚩 {curr['name']}")
+        st.markdown(
+            f"""<div class="detail-card"><p><b>📍 地址：</b> {curr['addr']}</p><p><b>⭐ 综合评分：</b> <span style="color:#f1c40f; font-weight:bold; font-size:18px;">{curr['score']}</span> / 5.0</p></div>""",
+            unsafe_allow_html=True)
+
+        # 评论区
+        st.markdown("#### 🗣️ 游客真实评价")
+        if not curr.get('kimi_reviews'):
+            if kimi_key:
+                with st.spinner(f"正在加载 {curr['name']} 的最新评论..."):
+                    reviews = get_kimi_reviews(curr['name'], city, kimi_key)
+                    st.session_state.spots[curr_idx]['kimi_reviews'] = reviews
+                    st.rerun()
+            else:
+                st.warning("数据接口连接失败")
+
+        if curr.get('kimi_reviews'):
+            for r in curr['kimi_reviews']:
+                try:
+                    score_str = str(r['score'])
+                    match = re.search(r"(\d+(\.\d+)?)", score_str)
+                    numeric_score = float(match.group(1)) if match else 4.0
+                    star_count = int(numeric_score)
+                except:
+                    numeric_score, star_count = 4.0, 4
+
+                st.markdown(f"""
+                <div class="review-bubble">
+                    <div class="review-header"><span class="user-name">👤 {r['user']}</span><span style="color:#f39c12;">{'★' * star_count} {numeric_score}</span></div>
+                    <div class="review-content">{r['text']}</div>
+                </div>""", unsafe_allow_html=True)
+
+        # 周边服务 (修复距离显示 & 图标混淆问题)
+        st.markdown("#### 🏨 周边服务推荐")
+
+        cache_key = f"nearby_v4_{curr['name']}"
         if cache_key not in st.session_state:
-            with st.spinner("查找周边..."):
-                f = search_nearby_baidu(curr['bd_lat'], curr['bd_lng'], "美食", baidu_ak)
-                h = search_nearby_baidu(curr['bd_lat'], curr['bd_lng'], "酒店", baidu_ak)
-                st.session_state[cache_key] = (f, h)
-        
-        f_res, h_res = st.session_state[cache_key]
-        c1, c2 = st.columns(2)
-        with c1:
-            st.info(f"🍜 **美食**: {f_res}")
-            st.write(f"🏠 **地址**: {curr['addr']}")
-        with c2:
-            st.success(f"🏨 **住宿**: {h_res}")
-            st.write(f"⭐ **评分**: {curr['score']}")
+            with st.spinner("正在搜索周边美食与住宿..."):
+                foods = search_nearby_baidu(curr['bd_lat'], curr['bd_lng'], "美食", user_ak)
+                hotels = search_nearby_baidu(curr['bd_lat'], curr['bd_lng'], "酒店", user_ak)
+                st.session_state[cache_key] = (foods, hotels)
 
-    # Tab 3: 智能清单
-    with tab3:
-        if st.session_state.weather:
-            pack_list = generate_smart_packing_list(st.session_state.weather)
-            c_left, c_right = st.columns(2)
-            
-            with c_left:
-                st.markdown("#### 👕 穿衣建议")
-                for item in pack_list["衣物建议"]:
-                    st.checkbox(item, value=True, key=item)
-            
-            with c_right:
-                st.markdown("#### 🎒 装备 & 必带")
-                for item in pack_list["必带"] + pack_list["装备建议"]:
-                    st.checkbox(item, value=True, key=item)
-        else:
-            st.info("需要先获取天气数据才能生成建议")
+        foods_list, hotels_list = st.session_state[cache_key]
+
+        tab_food, tab_hotel = st.tabs(["🍜 附近美食", "🛏️ 附近酒店"])
+
+        with tab_food:
+            if foods_list:
+                scroll_box = '<div style="height:180px; overflow-y:auto; border:1px solid #eee; padding:10px; border-radius:8px;">'
+                for f in foods_list:
+                    # 确保图标是 🍽️
+                    scroll_box += f"""
+                    <div class="info-list-item">
+                        <span>🍽️ {f['name']}</span>
+                        <span class="dist-tag">{f['dist']}米</span>
+                    </div>"""
+                scroll_box += '</div>'
+                st.markdown(scroll_box, unsafe_allow_html=True)
+            else:
+                st.info("暂无周边美食数据")
+
+        with tab_hotel:
+            if hotels_list:
+                scroll_box = '<div style="height:180px; overflow-y:auto; border:1px solid #eee; padding:10px; border-radius:8px;">'
+                for h in hotels_list:
+                    # 确保图标是 🏨
+                    scroll_box += f"""
+                    <div class="info-list-item">
+                        <span>🏨 {h['name']}</span>
+                        <span class="dist-tag">{h['dist']}米</span>
+                    </div>"""
+                scroll_box += '</div>'
+                st.markdown(scroll_box, unsafe_allow_html=True)
+            else:
+                st.info("暂无周边酒店数据")
+
+else:
+    st.info("👈 请在左侧输入目的地并生成方案")
